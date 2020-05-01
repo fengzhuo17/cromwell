@@ -26,6 +26,8 @@ class DigesterTestMethods(unittest.TestCase):
     quieten_chatty_imports()
 
     def test_digestion(self) -> None:
+        # A cache of expensive-to-create GCS comparison paths.
+        gcs_comparison_path_by_subdir = {}
         papi_versions = [VERSION_PAPI_V1, VERSION_PAPI_V2]
         samples = {
             'dev_C1963.CHMI_CHMI3_Nex1': {
@@ -73,7 +75,12 @@ class DigesterTestMethods(unittest.TestCase):
 
             subdir = f'exome_germline_single_sample_v1.3/{path_element}'
             local_parent = ComparisonPath.create(subdir)
-            gcs_parent = ComparisonPath.create(f'gs://papi-performance-analysis/{subdir}')
+
+            def gcs_parent() -> ComparisonPath:
+                if subdir not in gcs_comparison_path_by_subdir:
+                    path = ComparisonPath.create(f'gs://papi-performance-analysis/{subdir}')
+                    gcs_comparison_path_by_subdir[subdir] = path
+                return gcs_comparison_path_by_subdir[subdir]
 
             for sample_name in samples.keys():
                 # Copy down workflow and PAPI operations metadata from GCS if needed to test Local
@@ -81,15 +88,19 @@ class DigesterTestMethods(unittest.TestCase):
                 if not local_sample_path.exists():
                     logging.info(f"Local sample directory '{local_sample_path}' does not exist, downloading from GCS.")
                     local_sample_path.mkdir()
-                    command = f"gsutil -m cp -r {gcs_parent}/{sample_name}/ {local_parent}"
+                    command = f"gsutil -m cp -r {gcs_parent()}/{sample_name}/ {local_parent}"
                     logging.info(f'Executing command: {command}')
                     os.system(command)
 
-                parents_to_test = [local_parent, gcs_parent]
+                parents_to_test = [local_parent]
+                # Skip slow GCS testing if this environment variable is set.
+                if not os.environ.get('DIGESTER_TEST_LOCAL_ONLY'):
+                    parents_to_test.append(gcs_parent())
 
                 for parent in parents_to_test:
                     description = parent.description()
-                    logging.info(f"Running digester test on {description} for sample '{sample_name}'")
+                    logging.info(
+                        f"Running digester test on {description} for sample '{sample_name}' on backend {papi_version}")
                     sample_path = parent / sample_name
                     workflow_path = sample_path / 'workflow.json'
                     operations_path = sample_path / 'operations'
@@ -104,21 +115,26 @@ class DigesterTestMethods(unittest.TestCase):
                     def more_than_x_attempts(attempts: int) -> Callable[[AnyStr], bool]:
                         def inner(call_name: AnyStr) -> bool:
                             return calls.get(call_name).get('attempt') > attempts
+
                         return inner
 
                     for num_attempts in [1, 2, 3]:
-                        actual = len(list(filter(more_than_x_attempts(num_attempts), calls)))
-                        self.assertEqual(actual, expected[f'more_than_{num_attempts}_attempts'])
+                        actual_len = len(list(filter(more_than_x_attempts(num_attempts), calls)))
+                        self.assertEqual(actual_len, expected[f'more_than_{num_attempts}_attempts'])
 
                     def more_than_x_minutes_longer(minutes: int) -> Callable[[AnyStr], bool]:
                         def inner(call_name: AnyStr) -> bool:
                             return calls.get(call_name).get('cromwellAdditionalTotalTimeSeconds') > minutes * 60
+
                         return inner
 
                     for minutes_longer in range(3, 9):
-                        actual = len(list(filter(more_than_x_minutes_longer(minutes_longer), calls)))
+                        actual_len = len(list(filter(more_than_x_minutes_longer(minutes_longer), calls)))
                         expectation = expected[f'cromwell_time_more_than_{minutes_longer}_minutes_longer_total']
-                        self.assertEqual(actual, expectation)
+                        self.assertEqual(actual_len, expectation)
+
+                    # Only a smoke test for now
+                    self.assertTrue(all([calls[name].get('dockerImagePullSeconds') > 0 for name in calls]))
 
 
 if __name__ == '__main__':
