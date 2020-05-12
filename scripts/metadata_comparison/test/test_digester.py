@@ -65,37 +65,42 @@ class DigesterTestMethods(unittest.TestCase):
             # 'dev_RP-1535.NA17-308'
         }
 
-        for papi_version in papi_versions:
-            if papi_version == VERSION_PAPI_V1:
+        def subdir_for_papi_version(_papi_version: AnyStr) -> AnyStr:
+            if _papi_version == VERSION_PAPI_V1:
                 path_element = 'PAPIv1'
-            elif papi_version == VERSION_PAPI_V2:
+            elif _papi_version == VERSION_PAPI_V2:
                 path_element = 'PAPIv2_alpha1/v1_style_machine_types'
             else:
-                raise ValueError(f'Unrecognized PAPI version {papi_version}')
+                raise ValueError(f'Unrecognized PAPI version {_papi_version}')
+            return f'exome_germline_single_sample_v1.3/{path_element}'
 
-            subdir = f'exome_germline_single_sample_v1.3/{path_element}'
+        def gcs_parent(_subdir: AnyStr) -> ComparisonPath:
+            """GcsComparisonPaths are somewhat expensive to create so cache them."""
+            if _subdir not in gcs_comparison_path_by_subdir:
+                path = ComparisonPath.create(f'gs://papi-performance-analysis/{_subdir}')
+                gcs_comparison_path_by_subdir[_subdir] = path
+            return gcs_comparison_path_by_subdir[_subdir]
+
+        def download_metadata_from_gcs_if_needed(_sample_name: AnyStr, _local_parent: ComparisonPath, _subdir: AnyStr) -> None:
+            """Copy down workflow and PAPI operations metadata from GCS if needed to test Local."""
+            local_sample_path = _local_parent / _sample_name
+            if not local_sample_path.exists():
+                logging.info(f"Local sample directory '{local_sample_path}' does not exist, downloading from GCS.")
+                local_sample_path.mkdir_p()
+                command = f"gsutil -m cp -r {gcs_parent(_subdir)}/{_sample_name}/ {_local_parent}"
+                logging.info(f'Executing command: {command}')
+                os.system(command)
+
+        for papi_version in papi_versions:
+            subdir = subdir_for_papi_version(papi_version)
             local_parent = ComparisonPath.create(subdir)
 
-            def gcs_parent() -> ComparisonPath:
-                if subdir not in gcs_comparison_path_by_subdir:
-                    path = ComparisonPath.create(f'gs://papi-performance-analysis/{subdir}')
-                    gcs_comparison_path_by_subdir[subdir] = path
-                return gcs_comparison_path_by_subdir[subdir]
-
             for sample_name in samples.keys():
-                # Copy down workflow and PAPI operations metadata from GCS if needed to test Local
-                local_sample_path = local_parent / sample_name
-                if not local_sample_path.exists():
-                    logging.info(f"Local sample directory '{local_sample_path}' does not exist, downloading from GCS.")
-                    local_sample_path.mkdir()
-                    command = f"gsutil -m cp -r {gcs_parent()}/{sample_name}/ {local_parent}"
-                    logging.info(f'Executing command: {command}')
-                    os.system(command)
-
+                download_metadata_from_gcs_if_needed(sample_name, local_parent, subdir)
                 parents_to_test = [local_parent]
                 # Skip slow GCS testing if this environment variable is set.
                 if not os.environ.get('DIGESTER_TEST_LOCAL_ONLY'):
-                    parents_to_test.append(gcs_parent())
+                    parents_to_test.append(gcs_parent(subdir))
 
                 for parent in parents_to_test:
                     description = parent.description()
@@ -113,9 +118,11 @@ class DigesterTestMethods(unittest.TestCase):
                     self.assertEqual(actual_total, expected['total_jobs'])
 
                     def more_than_x_attempts(attempts: int) -> Callable[[AnyStr], bool]:
+                        """
+                        Return a function to filter the calls that had more than the specified number of attempts.
+                        """
                         def inner(call_name: AnyStr) -> bool:
                             return calls.get(call_name).get('attempt') > attempts
-
                         return inner
 
                     for num_attempts in [1, 2, 3]:
@@ -123,9 +130,11 @@ class DigesterTestMethods(unittest.TestCase):
                         self.assertEqual(actual_len, expected[f'more_than_{num_attempts}_attempts'])
 
                     def more_than_x_minutes_longer(minutes: int) -> Callable[[AnyStr], bool]:
+                        """
+                        Return a function to filter the calls that ran for more than the specified number of minutes.
+                        """
                         def inner(call_name: AnyStr) -> bool:
                             return calls.get(call_name).get('cromwellAdditionalTotalTimeSeconds') > minutes * 60
-
                         return inner
 
                     for minutes_longer in range(3, 9):

@@ -78,9 +78,6 @@ def digest(workflow_path: ComparisonPath, operations_path: ComparisonPath) -> Js
 
             papi_total_time_seconds = operation.total_time_seconds()
 
-            #docker_image_pull_seconds = operation.docker_image_pull_seconds()
-            #print(f'docker_image_pull_seconds is {docker_image_pull_seconds}')
-
             cromwell_additional_total_time_seconds = \
                 float("%.3f" % (cromwell_total_time_seconds - papi_total_time_seconds))
 
